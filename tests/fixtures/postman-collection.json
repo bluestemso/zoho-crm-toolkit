@@ -1,0 +1,33 @@
+{
+  "info": {
+    "name": "Zoho CRM Postman"
+  },
+  "item": [
+    {
+      "name": "Records",
+      "item": [
+        {
+          "name": "Get Records",
+          "request": {
+            "method": "GET",
+            "description": "Fetch records from a module.",
+            "url": {
+              "raw": "https://www.zohoapis.com/crm/v8/:module?fields=Last_Name,Email",
+              "path": [
+                "crm",
+                "v8",
+                ":module"
+              ],
+              "query": [
+                {
+                  "key": "fields",
+                  "value": "Last_Name,Email"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

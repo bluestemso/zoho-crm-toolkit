@@ -1,0 +1,15 @@
+{
+  "checks": [
+    {
+      "name": "Leads list responds",
+      "selector": "getrecords",
+      "path_params": {
+        "module": "Leads"
+      },
+      "query": {
+        "fields": "Last_Name,Email"
+      },
+      "expect_status": [200, 204]
+    }
+  ]
+}

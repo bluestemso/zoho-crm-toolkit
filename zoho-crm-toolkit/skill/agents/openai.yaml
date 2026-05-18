@@ -1,0 +1,3 @@
+display_name: zoho-crm-toolkit
+short_description: Zoho CRM full-surface toolkit backed by a local searchable API index and generic CLI.
+default_prompt: Use the local Zoho API index and generic CLI to plan, apply, verify, and explain Zoho CRM configuration work.

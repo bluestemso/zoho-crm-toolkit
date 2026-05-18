@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <body>
+    <h1>Get Records</h1>
+    <h4>Purpose</h4>
+    <p>Get records from a module or fetch one record by ID.</p>
+    <h4>Endpoints</h4>
+    <ul>
+      <li>GET /{module_api_name}</li>
+      <li>GET /{module_api_name}/{record_id}</li>
+    </ul>
+    <h4>Request URL</h4>
+    <p>{api-domain}/crm/{version}/{module_api_name}</p>
+    <h4>Scope</h4>
+    <p>ZohoCRM.modules.ALL</p>
+    <p>ZohoCRM.modules.leads.READ</p>
+    <h5>Supported modules</h5>
+    <p>Leads, Contacts and Custom</p>
+    <h5>Parameters</h5>
+    <ul>
+      <li>fields string, mandatory</li>
+      <li>page integer</li>
+    </ul>
+  </body>
+</html>

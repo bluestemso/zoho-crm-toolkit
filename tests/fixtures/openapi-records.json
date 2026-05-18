@@ -1,0 +1,129 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Records",
+    "version": "8.0"
+  },
+  "servers": [
+    {
+      "url": "https://zohoapis.{dc}/crm/{version}",
+      "variables": {
+        "dc": {
+          "default": "com"
+        },
+        "version": {
+          "default": "v8"
+        }
+      }
+    }
+  ],
+  "paths": {
+    "/{module}": {
+      "get": {
+        "operationId": "getRecords",
+        "summary": "Get Records",
+        "description": "Fetch records from a module.",
+        "tags": [
+          "Records"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Module"
+          },
+          {
+            "$ref": "#/components/parameters/Fields"
+          }
+        ],
+        "security": [
+          {
+            "iam-oauth2-schema": [
+              "ZohoCRM.modules.Leads.READ",
+              "ZohoCRM.modules.READ"
+            ]
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createRecords",
+        "summary": "Create Records",
+        "description": "Create records in a module.",
+        "tags": [
+          "Records"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Module"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordsInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Module": {
+        "name": "module",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Fields": {
+        "name": "fields",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "schemas": {
+      "RecordsInput": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "Last_Name"
+              ],
+              "properties": {
+                "Last_Name": {
+                  "type": "string"
+                },
+                "Email": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "trigger": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

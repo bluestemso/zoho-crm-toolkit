@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+
+ROOT = Path(__file__).resolve().parent.parent
+SPEC_PATH = ROOT / "spec" / "endpoints.json"
+TOKEN_URLS_BY_DC = {
+    "com": "https://accounts.zoho.com",
+    "eu": "https://accounts.zoho.eu",
+    "in": "https://accounts.zoho.in",
+    "cn": "https://accounts.zoho.com.cn",
+    "au": "https://accounts.zoho.com.au",
+}
+AUTH_CONTEXT = None
+
+
+def load_spec():
+    return json.loads(SPEC_PATH.read_text(encoding="utf-8"))
+
+
+def endpoint_text(endpoint):
+    parts = [
+        endpoint.get("slug", ""),
+        endpoint.get("title", ""),
+        endpoint.get("description", ""),
+        endpoint.get("section", ""),
+        endpoint.get("group", ""),
+        endpoint.get("method", ""),
+        endpoint.get("path", ""),
+        " ".join(endpoint.get("tags", [])),
+        " ".join(endpoint.get("scopes", [])),
+        " ".join(endpoint.get("supported_modules", [])),
+        " ".join(parameter.get("name", "") for parameter in endpoint.get("parameter_details", [])),
+    ]
+    return " ".join(part for part in parts if part).lower()
+
+
+def parse_pairs(values):
+    parsed = {}
+    for value in values:
+        key, sep, raw = value.partition("=")
+        if not sep:
+            raise SystemExit(f"Expected KEY=VALUE, got: {value}")
+        parsed[key] = raw
+    return parsed
+
+
+def render_path(path_template, path_params):
+    rendered = path_template
+    for key, value in path_params.items():
+        rendered = rendered.replace("{" + key + "}", value)
+    missing = re.findall(r"{([^}]+)}", rendered)
+    if missing:
+        raise SystemExit("Missing path parameter(s): " + ", ".join(missing))
+    return rendered
+
+
+def find_endpoint(spec, selector):
+    selector = selector.strip().lower()
+    matches = [
+        endpoint
+        for endpoint in spec
+        if endpoint["slug"] == selector or endpoint["title"].lower() == selector
+    ]
+    if not matches:
+        raise SystemExit(f"Unknown endpoint: {selector}")
+    return matches[0]
+
+
+def build_base_url():
+    explicit = os.environ.get("ZOHO_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    dc = os.environ.get("ZOHO_DC", "com")
+    version = os.environ.get("ZOHO_API_VERSION", "v8")
+    return f"https://www.zohoapis.{dc}/crm/{version}".rstrip("/")
+
+
+def build_accounts_url():
+    explicit = os.environ.get("ZOHO_ACCOUNTS_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    dc = os.environ.get("ZOHO_DC", "com").lower()
+    if dc not in TOKEN_URLS_BY_DC:
+        raise SystemExit(
+            f"Unsupported ZOHO_DC={dc!r}. Set ZOHO_ACCOUNTS_URL explicitly for your region."
+        )
+    return TOKEN_URLS_BY_DC[dc]
+
+
+def maybe_refresh_access_token():
+    global AUTH_CONTEXT
+    if AUTH_CONTEXT is not None:
+        return AUTH_CONTEXT
+
+    direct_token = os.environ.get("ZOHO_ACCESS_TOKEN")
+    if direct_token:
+        AUTH_CONTEXT = {
+            "access_token": direct_token,
+            "api_domain": None,
+            "source": "direct_access_token",
+        }
+        return AUTH_CONTEXT
+
+    client_id = os.environ.get("ZOHO_CLIENT_ID")
+    client_secret = os.environ.get("ZOHO_CLIENT_SECRET")
+    refresh_token = os.environ.get("ZOHO_REFRESH_TOKEN")
+    if not (client_id and client_secret and refresh_token):
+        raise SystemExit(
+            "Set ZOHO_ACCESS_TOKEN, or set ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET + ZOHO_REFRESH_TOKEN."
+        )
+
+    token_url = build_accounts_url() + "/oauth/v2/token"
+    body = urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+    ).encode("utf-8")
+    request = Request(
+        url=token_url,
+        method="POST",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with urlopen(request) as response:  # noqa: S310 - operator controls the target URL.
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except HTTPError as error:
+        payload = error.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"Failed to refresh Zoho access token: {payload}") from error
+
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise SystemExit(f"Zoho token refresh did not return an access_token: {payload}")
+
+    AUTH_CONTEXT = {
+        "access_token": access_token,
+        "api_domain": payload.get("api_domain"),
+        "source": "refresh_token",
+    }
+    return AUTH_CONTEXT
+
+
+def resolve_request_base_url(auth_context):
+    explicit = os.environ.get("ZOHO_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    api_domain = auth_context.get("api_domain")
+    if api_domain:
+        version = os.environ.get("ZOHO_API_VERSION", "v8")
+        return f"{api_domain.rstrip('/')}/crm/{version}".rstrip("/")
+    return build_base_url()
+
+
+def execute_request(endpoint, path_params, query_params, headers, body_bytes):
+    method = endpoint.get("method")
+    path = endpoint.get("path")
+    if not method or not path:
+        raise SystemExit("This endpoint is missing method or path details.")
+
+    rendered_path = render_path(path, path_params)
+    auth_context = maybe_refresh_access_token()
+    url = resolve_request_base_url(auth_context) + (
+        rendered_path if rendered_path.startswith("/") else "/" + rendered_path
+    )
+    if query_params:
+        url += "?" + urlencode(query_params)
+
+    request_headers = {"Accept": "application/json"}
+    request_headers["Authorization"] = f"Zoho-oauthtoken {auth_context['access_token']}"
+    request_headers.update(headers)
+    if body_bytes is not None and "Content-Type" not in request_headers:
+        content_type = endpoint.get("request_body", {}).get("content_type") or "application/json"
+        request_headers["Content-Type"] = content_type
+
+    request = Request(url=url, method=method.upper(), data=body_bytes, headers=request_headers)
+    try:
+        with urlopen(request) as response:  # noqa: S310 - operator controls the target URL.
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, dict(response.headers.items()), body, url, request_headers
+    except HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        return error.code, dict(error.headers.items()), body, url, request_headers
+
+
+def maybe_parse_json(text):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def filter_endpoints(spec, args, query=None):
+    filtered = []
+    query_text = query.lower() if query else None
+    for endpoint in spec:
+        if query_text and query_text not in endpoint_text(endpoint):
+            continue
+        if getattr(args, "method", None) and endpoint.get("method", "").lower() != args.method.lower():
+            continue
+        if getattr(args, "section", None) and endpoint.get("section", "").lower() != args.section.lower():
+            continue
+        if getattr(args, "group", None) and endpoint.get("group", "").lower() != args.group.lower():
+            continue
+        if getattr(args, "module", None):
+            modules = [value.lower() for value in endpoint.get("supported_modules", [])]
+            if args.module.lower() not in modules:
+                continue
+        if getattr(args, "scope", None):
+            scopes = " ".join(endpoint.get("scopes", [])).lower()
+            if args.scope.lower() not in scopes:
+                continue
+        filtered.append(endpoint)
+    filtered.sort(key=lambda item: (item.get("section", ""), item.get("group", ""), item.get("title", "")))
+    limit = getattr(args, "limit", None)
+    if limit:
+        filtered = filtered[:limit]
+    return filtered
+
+
+def render_result_line(endpoint):
+    return (
+        f"{endpoint['slug']}\t"
+        f"{endpoint.get('method') or '?'}\t"
+        f"{endpoint.get('section', '')}\t"
+        f"{endpoint.get('group', '')}\t"
+        f"{endpoint.get('title', '')}"
+    )
+
+
+def command_catalog(args):
+    spec = load_spec()
+    if args.catalog_command == "list":
+        results = filter_endpoints(spec, args)
+        if args.json:
+            print(json.dumps(results, indent=2))
+            return
+        for endpoint in results:
+            print(render_result_line(endpoint))
+        return
+
+    endpoint = find_endpoint(spec, args.selector)
+    print(json.dumps(endpoint, indent=2))
+
+
+def command_search(args):
+    spec = load_spec()
+    results = filter_endpoints(spec, args, query=args.query)
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+    for endpoint in results:
+        print(render_result_line(endpoint))
+
+
+def build_example_from_schema(schema, include_optional=True):
+    if not schema:
+        return {}
+    if "example" in schema:
+        return schema["example"]
+    if "default" in schema:
+        return schema["default"]
+    if "enum" in schema and schema["enum"]:
+        return schema["enum"][0]
+    schema_type = schema.get("type", "object")
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        if isinstance(properties, list):
+            return {name: "<value>" for name in properties}
+        output = {}
+        for name, value in properties.items():
+            if include_optional or name in required:
+                output[name] = build_example_from_schema(value, include_optional=include_optional)
+        return output
+    if schema_type == "array":
+        return [build_example_from_schema(schema.get("items", {}), include_optional=include_optional)]
+    if schema_type == "integer":
+        return 0
+    if schema_type == "number":
+        return 0
+    if schema_type == "boolean":
+        return False
+    return "<value>"
+
+
+def build_request_template(endpoint, include_optional=True):
+    template = {
+        "selector": endpoint["slug"],
+        "method": endpoint.get("method"),
+        "path": endpoint.get("path"),
+        "path_params": {},
+        "query": {},
+        "headers": {},
+    }
+    for parameter in endpoint.get("parameter_details", []):
+        placeholder = parameter.get("default")
+        if placeholder is None:
+            param_type = parameter.get("type")
+            if param_type == "integer":
+                placeholder = 0
+            elif param_type == "number":
+                placeholder = 0
+            elif param_type == "boolean":
+                placeholder = False
+            else:
+                placeholder = "<value>"
+        if not include_optional and not parameter.get("required"):
+            continue
+        if parameter.get("in") == "path":
+            template["path_params"][parameter["name"]] = placeholder
+        elif parameter.get("in") == "query":
+            template["query"][parameter["name"]] = placeholder
+        elif parameter.get("in") == "header":
+            template["headers"][parameter["name"]] = placeholder
+
+    request_body = endpoint.get("request_body") or {}
+    schema = request_body.get("schema") or {}
+    if schema:
+        template["body"] = build_example_from_schema(schema, include_optional=include_optional)
+    return template
+
+
+def command_template(args):
+    spec = load_spec()
+    endpoint = find_endpoint(spec, args.selector)
+    template = build_request_template(endpoint, include_optional=not args.required_only)
+    if args.kind == "body":
+        print(json.dumps(template.get("body", {}), indent=2))
+        return
+    if args.kind == "path":
+        print(json.dumps(template.get("path_params", {}), indent=2))
+        return
+    if args.kind == "query":
+        print(json.dumps(template.get("query", {}), indent=2))
+        return
+    if args.kind == "headers":
+        print(json.dumps(template.get("headers", {}), indent=2))
+        return
+    print(json.dumps(template, indent=2))
+
+
+def command_call(args):
+    spec = load_spec()
+    endpoint = find_endpoint(spec, args.selector)
+    path_params = parse_pairs(args.path_param)
+    query = parse_pairs(args.query)
+    headers = parse_pairs(args.header)
+
+    body_bytes = None
+    if args.body_file:
+        body_bytes = Path(args.body_file).read_bytes()
+    elif args.body_json:
+        body_bytes = args.body_json.encode("utf-8")
+
+    if args.dry_run:
+        rendered_path = render_path(endpoint["path"], path_params)
+        auth_source = "direct_access_token" if os.environ.get("ZOHO_ACCESS_TOKEN") else "refresh_token"
+        payload = {
+            "method": endpoint.get("method"),
+            "url": build_base_url() + (rendered_path if rendered_path.startswith("/") else "/" + rendered_path),
+            "query": query,
+            "headers": headers,
+            "body_file": args.body_file,
+            "body_json": maybe_parse_json(args.body_json) if args.body_json else None,
+            "auth_source": auth_source,
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    status, response_headers, body, url, request_headers = execute_request(
+        endpoint,
+        path_params,
+        query,
+        headers,
+        body_bytes,
+    )
+    if args.output_file:
+        Path(args.output_file).write_text(body, encoding="utf-8")
+
+    if args.include_response_meta:
+        payload = {
+            "request": {
+                "url": url,
+                "method": endpoint.get("method"),
+                "headers": request_headers,
+            },
+            "response": {
+                "status": status,
+                "headers": response_headers,
+                "body": maybe_parse_json(body) if args.parse_json else body,
+            },
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    if args.parse_json:
+        parsed = maybe_parse_json(body)
+        if parsed is not None:
+            print(json.dumps(parsed, indent=2))
+            return
+    print(body)
+
+
+def resolve_path_value(data, path):
+    current = data
+    normalized = path.replace("[", ".").replace("]", "")
+    for part in normalized.split("."):
+        if part == "":
+            continue
+        if isinstance(current, list):
+            current = current[int(part)]
+        else:
+            current = current[part]
+    return current
+
+
+def command_verify(args):
+    manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    checks = manifest.get("checks", [])
+    if not isinstance(checks, list):
+        raise SystemExit("Manifest must contain a top-level 'checks' array.")
+
+    spec = load_spec()
+    failures = []
+    for check in checks:
+        name = check.get("name") or check.get("selector")
+        endpoint = find_endpoint(spec, check["selector"])
+        status, _, body, _, _ = execute_request(
+            endpoint,
+            check.get("path_params", {}),
+            check.get("query", {}),
+            check.get("headers", {}),
+            json.dumps(check["body"]).encode("utf-8") if "body" in check else None,
+        )
+        expected_status = check.get("expect_status", [200])
+        if status not in expected_status:
+            failures.append(f"{name}: expected status {expected_status}, got {status}")
+            if args.fail_fast:
+                break
+            continue
+
+        parsed = maybe_parse_json(body)
+        if parsed is None and (check.get("expect_paths") or check.get("expect_values")):
+            failures.append(f"{name}: response body is not valid JSON")
+            if args.fail_fast:
+                break
+            continue
+
+        for path in check.get("expect_paths", []):
+            try:
+                resolve_path_value(parsed, path)
+            except Exception:
+                failures.append(f"{name}: missing path {path}")
+                if args.fail_fast:
+                    break
+        if failures and args.fail_fast:
+            break
+
+        for path, expected in check.get("expect_values", {}).items():
+            try:
+                actual = resolve_path_value(parsed, path)
+            except Exception:
+                failures.append(f"{name}: missing path {path}")
+                if args.fail_fast:
+                    break
+                continue
+            if actual != expected:
+                failures.append(f"{name}: expected {path}={expected!r}, got {actual!r}")
+                if args.fail_fast:
+                    break
+        if failures and args.fail_fast:
+            break
+
+        if args.verbose:
+            print(f"PASS\t{name}")
+
+    if failures:
+        for failure in failures:
+            print(f"FAIL\t{failure}")
+        raise SystemExit(1)
+
+    print(f"PASS\t{len(checks)} check(s)")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Generic Zoho CRM CLI backed by a local API index.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    catalog = subparsers.add_parser("catalog", help="Inspect the generated endpoint catalog.")
+    catalog_subparsers = catalog.add_subparsers(dest="catalog_command", required=True)
+    list_command = catalog_subparsers.add_parser("list", help="List known endpoints.")
+    list_command.add_argument("--method")
+    list_command.add_argument("--section")
+    list_command.add_argument("--group")
+    list_command.add_argument("--module")
+    list_command.add_argument("--scope")
+    list_command.add_argument("--limit", type=int)
+    list_command.add_argument("--json", action="store_true")
+    show = catalog_subparsers.add_parser("show", help="Show one endpoint definition.")
+    show.add_argument("selector")
+    catalog.set_defaults(func=command_catalog)
+
+    search = subparsers.add_parser("search", help="Search endpoints by free text and filters.")
+    search.add_argument("query")
+    search.add_argument("--method")
+    search.add_argument("--section")
+    search.add_argument("--group")
+    search.add_argument("--module")
+    search.add_argument("--scope")
+    search.add_argument("--limit", type=int, default=25)
+    search.add_argument("--json", action="store_true")
+    search.set_defaults(func=command_search)
+
+    template = subparsers.add_parser("template", help="Generate starter request templates.")
+    template.add_argument("selector")
+    template.add_argument("--kind", choices=["request", "body", "path", "query", "headers"], default="request")
+    template.add_argument("--required-only", action="store_true")
+    template.set_defaults(func=command_template)
+
+    call = subparsers.add_parser("call", help="Execute any indexed endpoint.")
+    call.add_argument("selector")
+    call.add_argument("--path-param", action="append", default=[])
+    call.add_argument("--query", action="append", default=[])
+    call.add_argument("--header", action="append", default=[])
+    call.add_argument("--body-file")
+    call.add_argument("--body-json")
+    call.add_argument("--dry-run", action="store_true")
+    call.add_argument("--output-file")
+    call.add_argument("--parse-json", action="store_true")
+    call.add_argument("--include-response-meta", action="store_true")
+    call.set_defaults(func=command_call)
+
+    verify = subparsers.add_parser("verify", help="Run a verification manifest against live Zoho APIs.")
+    verify.add_argument("manifest")
+    verify.add_argument("--fail-fast", action="store_true")
+    verify.add_argument("--verbose", action="store_true")
+    verify.set_defaults(func=command_verify)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
