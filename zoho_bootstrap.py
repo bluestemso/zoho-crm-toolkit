@@ -787,13 +787,16 @@ def build_spec(
     return endpoints
 
 
-def discover_openapi_sources_from_html(html: str, index_url: str) -> List[str]:
+def parse_github_tree_url(index_url: str) -> tuple[str, str, str, str]:
     parsed = urlparse(index_url)
     match = re.match(r"^/([^/]+)/([^/]+)/tree/([^/]+)/(.+)$", parsed.path)
     if parsed.netloc != "github.com" or not match:
         raise ValueError(f"Unsupported GitHub tree URL: {index_url}")
+    return match.groups()
 
-    owner, repo, branch, directory = match.groups()
+
+def discover_openapi_sources_from_html(html: str, index_url: str) -> List[str]:
+    owner, repo, branch, directory = parse_github_tree_url(index_url)
     href_pattern = re.compile(
         rf'href="/{re.escape(owner)}/{re.escape(repo)}/blob/{re.escape(branch)}/({re.escape(directory)}/[^"#?]+\.json)"'
     )
@@ -803,8 +806,37 @@ def discover_openapi_sources_from_html(html: str, index_url: str) -> List[str]:
     return sorted(dedupe_preserve_order(raw_urls))
 
 
+def discover_openapi_sources_from_github_contents(index_url: str) -> List[str]:
+    owner, repo, branch, directory = parse_github_tree_url(index_url)
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{directory}?ref={branch}"
+    listing = read_json_source(api_url)
+    if not isinstance(listing, list):
+        raise ValueError(f"Unexpected GitHub contents response for {index_url}")
+
+    raw_urls: List[str] = []
+    for item in listing:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "file":
+            continue
+        name = str(item.get("name", ""))
+        if not name.endswith(".json"):
+            continue
+        download_url = item.get("download_url")
+        if isinstance(download_url, str) and download_url:
+            raw_urls.append(download_url)
+            continue
+        path = item.get("path")
+        if isinstance(path, str) and path:
+            raw_urls.append(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}")
+    return sorted(dedupe_preserve_order(raw_urls))
+
+
 def discover_openapi_sources(index_url: str = DEFAULT_ZOHO_OAS_INDEX_URL) -> List[str]:
-    return discover_openapi_sources_from_html(fetch_text(index_url), index_url)
+    try:
+        return discover_openapi_sources_from_github_contents(index_url)
+    except Exception:
+        return discover_openapi_sources_from_html(fetch_text(index_url), index_url)
 
 
 def render_catalog_markdown(endpoints: List[Endpoint]) -> str:
@@ -838,12 +870,13 @@ Use this toolkit when a coding agent needs the full Zoho CRM API surface without
 
 Recommended workflow:
 1. Read the attached requirements file and extract the target modules, workflows, layouts, fields, and expected behaviors.
-2. Search the local API index with `{cli_name} search <terms>`.
-3. Inspect exact endpoint details with `{cli_name} show <slug>`.
-4. Generate starter payloads with `{cli_name} template <slug> --kind request`.
-5. Apply changes with `{cli_name} call <slug> ...`.
-6. Verify with read-back calls or `{cli_name} verify <manifest.json>`.
-7. Write manual test steps for the human operator after the automated checks pass.
+2. Confirm auth and connectivity with `{cli_name} check`.
+3. Search the local API index with `{cli_name} search <terms>`.
+4. Inspect exact endpoint details with `{cli_name} catalog show <slug>`.
+5. Generate starter payloads with `{cli_name} template <slug> --kind request`.
+6. Apply changes with `{cli_name} call <slug> ...`.
+7. Verify with read-back calls or `{cli_name} verify <manifest.json>`.
+8. Write manual test steps for the human operator after the automated checks pass.
 """
 
 
@@ -857,12 +890,13 @@ Use this skill when a task involves large-scale Zoho CRM configuration or testin
 
 Workflow:
 1. Read the attached requirements file or local spec file.
-2. Search the local API index with `{cli_name} search <terms>`.
-3. Inspect exact endpoint contracts with `{cli_name} show <slug>`.
-4. Generate request templates with `{cli_name} template <slug> --kind request`.
-5. Apply changes with `{cli_name} call <slug> ...`.
-6. Verify with read-back calls or `{cli_name} verify <manifest.json>`.
-7. Finish by writing clear manual test instructions for the user.
+2. Confirm auth and connectivity with `{cli_name} check`.
+3. Search the local API index with `{cli_name} search <terms>`.
+4. Inspect exact endpoint contracts with `{cli_name} catalog show <slug>`.
+5. Generate request templates with `{cli_name} template <slug> --kind request`.
+6. Apply changes with `{cli_name} call <slug> ...`.
+7. Verify with read-back calls or `{cli_name} verify <manifest.json>`.
+8. Finish by writing clear manual test instructions for the user.
 
 Important rules:
 - Do not ask the user to locate API docs sections.
@@ -871,8 +905,9 @@ Important rules:
 - Save repeatable payloads and verification manifests under `configs/` or `tests/`.
 
 Common commands:
+- `{cli_name} check`
 - `{cli_name} search "workflow transitions"`
-- `{cli_name} show getrecords`
+- `{cli_name} catalog show getrecords`
 - `{cli_name} template createrecords --kind request`
 - `{cli_name} call getrecords --path-param module=Leads --query fields=Last_Name,Email`
 - `{cli_name} verify tests/zoho-smoke.json`
@@ -893,7 +928,7 @@ default_prompt: Use the local Zoho API index and generic CLI to plan, apply, ver
 
 
 def render_cli() -> str:
-    return local_template_text("zoho-crm-toolkit", "cli", "zoho-api")
+    return local_template_text("zoho-crm-toolkit", "cli", "zoho-cli")
 
 
 def render_env_example() -> str:
@@ -918,11 +953,12 @@ This toolkit exposes the Zoho CRM API surface to a coding agent without loading 
 - Postman collections vendored: {len(source_manifest.get('postman', []))}
 
 Primary commands:
-- `./cli/zoho-api search "module workflow"`
-- `./cli/zoho-api show getrecords`
-- `./cli/zoho-api template createrecords --kind request`
-- `./cli/zoho-api call getrecords --path-param module=Leads --query fields=Last_Name,Email`
-- `./cli/zoho-api verify tests/zoho-smoke.json`
+- `./cli/zoho-cli check`
+- `./cli/zoho-cli search "module workflow"`
+- `./cli/zoho-cli catalog show getrecords`
+- `./cli/zoho-cli template createrecords --kind request`
+- `./cli/zoho-cli call getrecords --path-param module=Leads --query fields=Last_Name,Email`
+- `./cli/zoho-cli verify tests/zoho-smoke.json`
 """
 
 
@@ -951,14 +987,14 @@ def render_scaffold(
     *,
     source_manifest: Dict[str, List[str]],
 ) -> None:
-    cli_name = "./cli/zoho-api"
+    cli_name = "./cli/zoho-cli"
     write_file(output_dir / "spec" / "endpoints.json", json.dumps([asdict(endpoint) for endpoint in endpoints], indent=2) + "\n")
     write_file(output_dir / "spec" / "sources.json", json.dumps(source_manifest, indent=2) + "\n")
     write_file(output_dir / "references" / "catalog.md", render_catalog_markdown(endpoints))
     write_file(output_dir / "references" / "workflow.md", render_workflow_reference(cli_name))
     write_file(output_dir / "skill" / "SKILL.md", render_skill(project_name, cli_name))
     write_file(output_dir / "skill" / "agents" / "openai.yaml", render_openai_yaml(project_name))
-    write_file(output_dir / "cli" / "zoho-api", render_cli(), executable=True)
+    write_file(output_dir / "cli" / "zoho-cli", render_cli(), executable=True)
     write_file(output_dir / ".env.example", render_env_example())
     write_file(output_dir / "tests" / "zoho-smoke.json", render_verify_example())
     write_file(output_dir / "configs" / "modules" / ".gitkeep", "")

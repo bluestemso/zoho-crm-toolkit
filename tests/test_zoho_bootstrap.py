@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import json
 import subprocess
 import unittest
+from unittest import mock
 
 import zoho_bootstrap
 
@@ -77,7 +78,7 @@ class ZohoBootstrapTests(unittest.TestCase):
             output_dir = Path(temp_dir)
             self.assertTrue((output_dir / "spec" / "endpoints.json").exists())
             self.assertTrue((output_dir / "skill" / "SKILL.md").exists())
-            self.assertTrue((output_dir / "cli" / "zoho-api").exists())
+            self.assertTrue((output_dir / "cli" / "zoho-cli").exists())
 
             payload = json.loads((output_dir / "spec" / "endpoints.json").read_text(encoding="utf-8"))
             self.assertEqual(len(payload), 2)
@@ -106,9 +107,11 @@ class ZohoBootstrapTests(unittest.TestCase):
             env_example = (output_dir / ".env.example").read_text(encoding="utf-8")
             self.assertIn("ZOHO_REFRESH_TOKEN=", env_example)
             self.assertIn("ZOHO_CLIENT_ID=", env_example)
+            self.assertIn("ZOHO_AUTH_MODE=auto", env_example)
+            self.assertIn("ZOHO_TOKEN_CACHE_FILE=", env_example)
 
             cli_output = subprocess.check_output(
-                [str(output_dir / "cli" / "zoho-api"), "template", "createrecords", "--kind", "body"],
+                [str(output_dir / "cli" / "zoho-cli"), "template", "createrecords", "--kind", "body"],
                 text=True,
             )
             body_template = json.loads(cli_output)
@@ -138,6 +141,61 @@ class ZohoBootstrapTests(unittest.TestCase):
             html,
             "https://github.com/zoho/crm-oas/tree/main/v8.0",
         )
+        self.assertEqual(
+            urls,
+            [
+                "https://raw.githubusercontent.com/zoho/crm-oas/main/v8.0/apis.json",
+                "https://raw.githubusercontent.com/zoho/crm-oas/main/v8.0/modules.json",
+                "https://raw.githubusercontent.com/zoho/crm-oas/main/v8.0/record.json",
+            ],
+        )
+
+    def test_discover_openapi_sources_from_github_contents(self):
+        listing = [
+            {
+                "name": "workflow_rules.json",
+                "path": "v8.0/workflow_rules.json",
+                "type": "file",
+                "download_url": "https://raw.githubusercontent.com/zoho/crm-oas/main/v8.0/workflow_rules.json",
+            },
+            {
+                "name": "workflow_configurations.json",
+                "path": "v8.0/workflow_configurations.json",
+                "type": "file",
+                "download_url": "https://raw.githubusercontent.com/zoho/crm-oas/main/v8.0/workflow_configurations.json",
+            },
+            {
+                "name": "python",
+                "path": "v8.0/python",
+                "type": "dir",
+                "download_url": None,
+            },
+        ]
+        with mock.patch.object(zoho_bootstrap, "read_json_source", return_value=listing):
+            urls = zoho_bootstrap.discover_openapi_sources_from_github_contents(
+                "https://github.com/zoho/crm-oas/tree/main/v8.0",
+            )
+
+        self.assertEqual(
+            urls,
+            [
+                "https://raw.githubusercontent.com/zoho/crm-oas/main/v8.0/workflow_configurations.json",
+                "https://raw.githubusercontent.com/zoho/crm-oas/main/v8.0/workflow_rules.json",
+            ],
+        )
+
+    def test_discover_openapi_sources_falls_back_to_html(self):
+        html = (FIXTURES / "zoho-oas-index.html").read_text(encoding="utf-8")
+        with mock.patch.object(
+            zoho_bootstrap,
+            "discover_openapi_sources_from_github_contents",
+            side_effect=ValueError("boom"),
+        ):
+            with mock.patch.object(zoho_bootstrap, "fetch_text", return_value=html):
+                urls = zoho_bootstrap.discover_openapi_sources(
+                    "https://github.com/zoho/crm-oas/tree/main/v8.0",
+                )
+
         self.assertEqual(
             urls,
             [

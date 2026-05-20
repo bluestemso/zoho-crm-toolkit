@@ -2050,3 +2050,129 @@ You can only include **either** `cvid` **or** one of the search parameters (`cri
   To update an existing webhook available in your Zoho CRM account.
   `PUT /settings/automation/webhooks/{webhookId}`
   Scopes: ZohoCRM.settings.automation_actions.UPDATE
+
+## Wizards
+
+### Wizards
+
+- `getallwizards`: Get all wizards with basic details
+  This API is used to get all the wizards' basic information available in the CRM account. You can filter the response by providing the module name as a query parameter.
+  `GET /settings/wizards`
+  Scopes: ZohoCRM.settings.wizards.READ
+
+## Workflow Configurations
+
+### Workflow Configurations
+
+- `getworkflowconfigurations`: To get workflow configuration metadata
+  To retrieve the complete configuration metadata details for workflows.This includes the list of available triggers for the module, the actions supported for each trigger, and their limits and properties.&nbsp;
+  `GET /workflow_configurations`
+  Scopes: ZohoCRM.settings.workflow_rules.READ
+
+## Workflow Rules
+
+### Workflow Rules
+
+- `postworkflowrule`: Configure a Workflow rule
+  To configure a Workflow rule
+  `POST /settings/automation/workflow_rules`
+  Scopes: ZohoCRM.settings.workflow_rules.CREATE
+- `deleteworkflowrules`: Delete Multiple Workflow Rules
+  Delete Multiple Workflow Rules
+  `DELETE /settings/automation/workflow_rules`
+  Scopes: ZohoCRM.settings.workflow_rules.DELETE
+- `deleteworkflowrulebyid`: Delete Workflow Rule By ID
+  Deletes an existing workflow rule by its ID.
+  `DELETE /settings/automation/workflow_rules/{id}`
+  Scopes: ZohoCRM.settings.workflow_rules.DELETE
+- `getworkflowrules`: Get All WorkflowRules
+  To retrieve the list of Workflow rules
+  `GET /settings/automation/workflow_rules`
+  Scopes: ZohoCRM.settings.workflow_rules.READ
+- `getactionscount`: Get Workflow Rule actions count
+  To retrieve the total number of actions configured in the specified Workflow rules, including both instant and scheduled actions. The response includes a count of actions, categorized by action type.
+  `GET /settings/automation/workflow_rules/actions/actions_count`
+  Scopes: ZohoCRM.settings.workflow_rules.READ
+- `getmodulespecificactionscount`: Get Workflow Rule actions count for each module
+  Get Workflow Rule actions count for each module
+  `GET /settings/automation/workflow_rules/actions/module_specific_count`
+  Scopes: ZohoCRM.settings.workflow_rules.READ
+- `getrulescount`: Get Workflow Rules count
+  To fetch the limit and usage details of workflow rules and actions in your Zoho CRM account. Use this API to track how many rules and actions are configured and how many more you can create.
+  `GET /settings/automation/workflow_rules/actions/rules_count`
+  Scopes: ZohoCRM.settings.workflow_rules.READ
+- `getworkflowrulebyid`: Retrieve a single workflow
+  To retrieve the details of a specific Workflow rule in your Zoho CRM account.
+  `GET /settings/automation/workflow_rules/{id}`
+  Scopes: ZohoCRM.settings.workflow_rules.READ
+- `putreorder`: To reorder workflow rules
+  To update the execution order of Workflow rules in a specific module in Zoho CRM. By default, workflow rules are executed in the order in which they are created.
+  `PUT /settings/automation/workflow_rules/actions/reorder`
+  Scopes: ZohoCRM.settings.workflow_rules.UPDATE
+- `getusage`: To retrieve Workflow Rule usage
+  To retrieve the usage report of a specific Workflow Rule in your Zoho CRM organization. It provides a count of how many times the workflow was triggered and the success or failure metrics for each associated action within a specified date range.
+  `GET /settings/automation/workflow_rules/{workflowRuleId}/actions/usage`
+  Scopes: ZohoCRM.settings.workflow_rules.READ
+- `updateworkflowrulebyid`: Update Workflow Rule By ID
+  Updates an existing workflow rule with partial data.
+  `PUT /settings/automation/workflow_rules/{id}`
+  Scopes: ZohoCRM.settings.workflow_rules.UPDATE
+- `updateworkflowrule`: Update Workflow Rule For the Given ID in Body
+  Updates an existing workflow rule with partial data.
+  `PUT /settings/automation/workflow_rules`
+  Scopes: ZohoCRM.settings.workflow_rules.UPDATE
+
+## Automation Task
+
+### Automation Task
+
+- `deletetasks`: DELETE /settings/automation/tasks
+  To delete automation tasks configured in your Zoho CRM account.
+  `DELETE /settings/automation/tasks`
+  Scopes: ZohoCRM.settings.automation_actions.DELETE
+- `deletetaskbyid`: DELETE /settings/automation/tasks/{id}
+  To delete automation tasks configured in your Zoho CRM account.
+  `DELETE /settings/automation/tasks/{id}`
+  Scopes: ZohoCRM.settings.automation_actions.DELETE
+- `gettasks`: GET /settings/automation/tasks
+  To retrieve the list of automation tasks configured in your Zoho CRM organization.
+  `GET /settings/automation/tasks`
+  Scopes: ZohoCRM.settings.automation_actions.READ
+- `gettaskbyid`: GET /settings/automation/tasks/{id}
+  To retrieve automation tasks configured in your Zoho CRM organization
+  `GET /settings/automation/tasks/{id}`
+  Scopes: ZohoCRM.settings.automation_actions.READ
+- `posttasks`: POST /settings/automation/tasks
+  To create an automation task in your Zoho CRM organization.
+  `POST /settings/automation/tasks`
+  Scopes: ZohoCRM.settings.automation_actions.CREATE
+- `puttasksbyid`: PUT /settings/automation/tasks/123445566
+  To update an automation task in your Zoho CRM organization.
+  `PUT /settings/automation/tasks/{id}`
+  Scopes: ZohoCRM.settings.automation_actions.UPDATE
+
+## Zia Enrichment Configuration API
+
+### Zia Enrichment Configuration API
+
+- `getziaenrichmentconfiguration`: get Zia Enrichment Configuration for a specific module
+  get Zia Enrichment Configuration for a specific module
+  `GET /settings/zia/data_enrichment`
+  Scopes: ZohoCRM.zia.enrichment
+
+## ZIA Organization Enrichment API
+
+### ZIA Organization Enrichment API
+
+- `getziaorgenrichment`: Get Zia Org Enrichment
+  Retrieve the Zia Org Enrichment records with pagination and filtering options
+  `GET /__zia_org_enrichment`
+  Scopes: ZohoCRM.settings.intelligence.READ
+- `getorgenrichmentbyid`: Retrieve organization-level enrichment data by enrichment ID
+  Fetches the enrichment status and enriched organization data for a specific enrichment job using its unique ID. Returns completed, scheduled, or failed enrichment information along with enriched fields such as name, website, email, address, CEO, revenue, employees, social media, and industries.
+  `GET /__zia_org_enrichment/{id}`
+  Scopes: ZohoCRM.settings.intelligence.READ
+- `submitorgenrichmentrequest`: Trigger organization-level enrichment for a CRM record
+  Initiates the ZIA organization enrichment process for a specific CRM record. Accepts module name, record ID, and supported fields (name, email, website).
+  `POST /__zia_org_enrichment`
+  Scopes: ZohoCRM.settings.intelligence.CREATE

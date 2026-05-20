@@ -98,7 +98,13 @@
     "sources/openapi/users_transfer.json",
     "sources/openapi/variable_groups.json",
     "sources/openapi/variables.json",
-    "sources/openapi/webhooks.json"
+    "sources/openapi/webhooks.json",
+    "sources/openapi/wizards.json",
+    "sources/openapi/workflow_configurations.json",
+    "sources/openapi/workflow_rules.json",
+    "sources/openapi/workflow_tasks.json",
+    "sources/openapi/zia_enrichment.json",
+    "sources/openapi/zia_org_enrichment.json"
   ],
   "postman": []
 }

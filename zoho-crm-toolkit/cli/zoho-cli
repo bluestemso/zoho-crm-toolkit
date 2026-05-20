@@ -5,6 +5,8 @@ import argparse
 import json
 import os
 import re
+import shlex
+import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -21,6 +23,74 @@ TOKEN_URLS_BY_DC = {
     "au": "https://accounts.zoho.com.au",
 }
 AUTH_CONTEXT = None
+AUTH_MODE_VALUES = {"auto", "access_token", "refresh_token"}
+AUTH_RETRY_STATUS_CODES = {400, 401}
+DEFAULT_CONNECTION_CHECK_SELECTORS = ("getorganization", "getavailableapis")
+AUTH_RETRY_MARKERS = (
+    "invalid oauth token",
+    "invalid_oauth_token",
+    "invalid oauth",
+    "unauthorized access token",
+    "authentication failure",
+    "oauth token",
+)
+AUTH_SCOPE_FAILURE_MARKERS = (
+    "required oauth scope is missing",
+    "insufficient scope",
+)
+AUTH_PERMISSION_FAILURE_MARKERS = (
+    "permission denied",
+    "no permission",
+)
+
+
+def env_file_candidates():
+    explicit = os.environ.get("ZOHO_ENV_FILE")
+    if explicit:
+        return [Path(explicit).expanduser()]
+    return [
+        Path.cwd() / ".env.zoho",
+        Path.cwd() / ".env",
+        ROOT / ".env.zoho",
+        ROOT / ".env",
+    ]
+
+
+def parse_env_assignment(line):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.startswith("export "):
+        stripped = stripped[7:].strip()
+    key, sep, raw_value = stripped.partition("=")
+    if not sep:
+        return None
+    key = key.strip()
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        return None
+    value = raw_value.strip()
+    if value:
+        try:
+            parsed_parts = shlex.split(value, comments=True, posix=True)
+        except ValueError:
+            parsed_parts = [value]
+        if len(parsed_parts) == 1:
+            value = parsed_parts[0]
+    return key, value
+
+
+def load_env_files():
+    for candidate in env_file_candidates():
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        for line in candidate.read_text(encoding="utf-8").splitlines():
+            parsed = parse_env_assignment(line)
+            if parsed is None:
+                continue
+            key, value = parsed
+            os.environ.setdefault(key, value)
+        return candidate
+    return None
 
 
 def load_spec():
@@ -97,35 +167,155 @@ def build_accounts_url():
     return TOKEN_URLS_BY_DC[dc]
 
 
-def maybe_refresh_access_token():
-    global AUTH_CONTEXT
-    if AUTH_CONTEXT is not None:
-        return AUTH_CONTEXT
+def resolve_auth_mode():
+    mode = os.environ.get("ZOHO_AUTH_MODE", "auto").strip().lower().replace("-", "_")
+    if mode not in AUTH_MODE_VALUES:
+        raise SystemExit(
+            f"Unsupported ZOHO_AUTH_MODE={mode!r}. Use one of: "
+            + ", ".join(sorted(AUTH_MODE_VALUES))
+            + "."
+        )
+    return mode
 
-    direct_token = os.environ.get("ZOHO_ACCESS_TOKEN")
-    if direct_token:
-        AUTH_CONTEXT = {
-            "access_token": direct_token,
-            "api_domain": None,
-            "source": "direct_access_token",
-        }
-        return AUTH_CONTEXT
 
+def current_time():
+    return int(time.time())
+
+
+def parse_expiry_seconds(payload):
+    for key in ("expires_in_sec", "expires_in"):
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            continue
+        if seconds > 1_000_000:
+            seconds //= 1000
+        if seconds > 0:
+            return seconds
+    return None
+
+
+def token_cache_path():
+    explicit = os.environ.get("ZOHO_TOKEN_CACHE_FILE")
+    if explicit:
+        return Path(explicit).expanduser()
+    return ROOT / ".zoho-token-cache.json"
+
+
+def read_token_cache():
+    path = token_cache_path()
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def write_token_cache(auth_context):
+    path = token_cache_path()
+    payload = {
+        "access_token": auth_context["access_token"],
+        "api_domain": auth_context.get("api_domain"),
+        "expires_at": auth_context.get("expires_at"),
+        "refreshed_at": auth_context.get("refreshed_at"),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def clear_token_cache():
+    path = token_cache_path()
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def refresh_credentials():
     client_id = os.environ.get("ZOHO_CLIENT_ID")
     client_secret = os.environ.get("ZOHO_CLIENT_SECRET")
     refresh_token = os.environ.get("ZOHO_REFRESH_TOKEN")
     if not (client_id and client_secret and refresh_token):
+        return None
+    return {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+    }
+
+
+def can_refresh_access_token():
+    return refresh_credentials() is not None
+
+
+def auth_context_is_usable(auth_context):
+    if not auth_context:
+        return False
+    access_token = auth_context.get("access_token")
+    if not access_token:
+        return False
+    expires_at = auth_context.get("expires_at")
+    if expires_at is None:
+        return True
+    try:
+        return int(expires_at) > current_time() + 30
+    except (TypeError, ValueError):
+        return False
+
+
+def load_cached_auth_context():
+    cached = read_token_cache()
+    if not auth_context_is_usable(cached):
+        return None
+    return {
+        "access_token": cached["access_token"],
+        "api_domain": cached.get("api_domain"),
+        "expires_at": cached.get("expires_at"),
+        "refreshed_at": cached.get("refreshed_at"),
+        "source": "refresh_token_cache",
+    }
+
+
+def build_direct_access_token_context():
+    direct_token = os.environ.get("ZOHO_ACCESS_TOKEN")
+    if not direct_token:
+        return None
+    return {
+        "access_token": direct_token,
+        "api_domain": None,
+        "expires_at": None,
+        "refreshed_at": None,
+        "source": "direct_access_token",
+    }
+
+
+def refresh_access_token():
+    credentials = refresh_credentials()
+    if credentials is None:
         raise SystemExit(
-            "Set ZOHO_ACCESS_TOKEN, or set ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET + ZOHO_REFRESH_TOKEN."
+            "Refresh-token auth requires ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET + ZOHO_REFRESH_TOKEN."
         )
 
     token_url = build_accounts_url() + "/oauth/v2/token"
     body = urlencode(
         {
-            "client_id": client_id,
-            "client_secret": client_secret,
+            "client_id": credentials["client_id"],
+            "client_secret": credentials["client_secret"],
             "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
+            "refresh_token": credentials["refresh_token"],
         }
     ).encode("utf-8")
     request = Request(
@@ -138,19 +328,79 @@ def maybe_refresh_access_token():
         with urlopen(request) as response:  # noqa: S310 - operator controls the target URL.
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
     except HTTPError as error:
-        payload = error.read().decode("utf-8", errors="replace")
+        try:
+            payload = error.read().decode("utf-8", errors="replace")
+        finally:
+            error.close()
         raise SystemExit(f"Failed to refresh Zoho access token: {payload}") from error
 
     access_token = payload.get("access_token")
     if not access_token:
         raise SystemExit(f"Zoho token refresh did not return an access_token: {payload}")
 
-    AUTH_CONTEXT = {
+    expires_in = parse_expiry_seconds(payload)
+    # If Zoho omits expiry metadata, keep the cache window short to avoid refresh storms.
+    expires_at = current_time() + (max(60, expires_in - 60) if expires_in else 300)
+    auth_context = {
         "access_token": access_token,
         "api_domain": payload.get("api_domain"),
+        "expires_at": expires_at,
+        "refreshed_at": current_time(),
         "source": "refresh_token",
     }
-    return AUTH_CONTEXT
+    write_token_cache(auth_context)
+    return auth_context
+
+
+def resolve_auth_context(force_refresh=False):
+    global AUTH_CONTEXT
+    mode = resolve_auth_mode()
+
+    if force_refresh:
+        AUTH_CONTEXT = None
+        clear_token_cache()
+
+    if auth_context_is_usable(AUTH_CONTEXT):
+        return AUTH_CONTEXT
+
+    if mode == "access_token":
+        direct_context = build_direct_access_token_context()
+        if direct_context is None:
+            raise SystemExit("ZOHO_AUTH_MODE=access_token requires ZOHO_ACCESS_TOKEN.")
+        AUTH_CONTEXT = direct_context
+        return AUTH_CONTEXT
+
+    if mode == "refresh_token":
+        if not force_refresh:
+            cached_context = load_cached_auth_context()
+            if cached_context is not None:
+                AUTH_CONTEXT = cached_context
+                return AUTH_CONTEXT
+        AUTH_CONTEXT = refresh_access_token()
+        return AUTH_CONTEXT
+
+    if can_refresh_access_token():
+        if not force_refresh:
+            cached_context = load_cached_auth_context()
+            if cached_context is not None:
+                AUTH_CONTEXT = cached_context
+                return AUTH_CONTEXT
+        AUTH_CONTEXT = refresh_access_token()
+        return AUTH_CONTEXT
+
+    direct_context = build_direct_access_token_context()
+    if direct_context is not None:
+        AUTH_CONTEXT = direct_context
+        return AUTH_CONTEXT
+
+    raise SystemExit(
+        "Set ZOHO_ACCESS_TOKEN, or set ZOHO_CLIENT_ID + ZOHO_CLIENT_SECRET + "
+        "ZOHO_REFRESH_TOKEN."
+    )
+
+
+def maybe_refresh_access_token():
+    return resolve_auth_context(force_refresh=False)
 
 
 def resolve_request_base_url(auth_context):
@@ -164,6 +414,36 @@ def resolve_request_base_url(auth_context):
     return build_base_url()
 
 
+def should_retry_with_fresh_token(status, body, auth_context):
+    if not can_refresh_access_token():
+        return False
+    if resolve_auth_mode() == "access_token":
+        return False
+    if not auth_context:
+        return False
+    if status not in AUTH_RETRY_STATUS_CODES:
+        return False
+
+    normalized_body = body.lower()
+    if any(marker in normalized_body for marker in AUTH_SCOPE_FAILURE_MARKERS):
+        return False
+    return any(marker in normalized_body for marker in AUTH_RETRY_MARKERS)
+
+
+def send_request(url, method, request_headers, body_bytes):
+    request = Request(url=url, method=method.upper(), data=body_bytes, headers=request_headers)
+    try:
+        with urlopen(request) as response:  # noqa: S310 - operator controls the target URL.
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, dict(response.headers.items()), body, url, request_headers
+    except HTTPError as error:
+        try:
+            body = error.read().decode("utf-8", errors="replace")
+        finally:
+            error.close()
+        return error.code, dict(error.headers.items()), body, url, request_headers
+
+
 def execute_request(endpoint, path_params, query_params, headers, body_bytes):
     method = endpoint.get("method")
     path = endpoint.get("path")
@@ -171,7 +451,7 @@ def execute_request(endpoint, path_params, query_params, headers, body_bytes):
         raise SystemExit("This endpoint is missing method or path details.")
 
     rendered_path = render_path(path, path_params)
-    auth_context = maybe_refresh_access_token()
+    auth_context = resolve_auth_context()
     url = resolve_request_base_url(auth_context) + (
         rendered_path if rendered_path.startswith("/") else "/" + rendered_path
     )
@@ -185,14 +465,12 @@ def execute_request(endpoint, path_params, query_params, headers, body_bytes):
         content_type = endpoint.get("request_body", {}).get("content_type") or "application/json"
         request_headers["Content-Type"] = content_type
 
-    request = Request(url=url, method=method.upper(), data=body_bytes, headers=request_headers)
-    try:
-        with urlopen(request) as response:  # noqa: S310 - operator controls the target URL.
-            body = response.read().decode("utf-8", errors="replace")
-            return response.status, dict(response.headers.items()), body, url, request_headers
-    except HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        return error.code, dict(error.headers.items()), body, url, request_headers
+    status, response_headers, body, _, _ = send_request(url, method, request_headers, body_bytes)
+    if should_retry_with_fresh_token(status, body, auth_context):
+        fresh_auth_context = resolve_auth_context(force_refresh=True)
+        request_headers["Authorization"] = f"Zoho-oauthtoken {fresh_auth_context['access_token']}"
+        status, response_headers, body, _, _ = send_request(url, method, request_headers, body_bytes)
+    return status, response_headers, body, url, request_headers
 
 
 def maybe_parse_json(text):
@@ -200,6 +478,33 @@ def maybe_parse_json(text):
         return json.loads(text)
     except json.JSONDecodeError:
         return None
+
+
+def normalized_error_text(body):
+    parsed = maybe_parse_json(body)
+    if isinstance(parsed, dict):
+        parts = []
+        for key in ("code", "message", "status"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        details = parsed.get("details")
+        if isinstance(details, dict):
+            for value in details.values():
+                if isinstance(value, str):
+                    parts.append(value)
+                elif isinstance(value, list):
+                    parts.extend(str(item) for item in value)
+        body = " ".join(parts) or body
+    return body.lower()
+
+
+def is_scope_or_permission_error(status, body):
+    if status not in {400, 401, 403}:
+        return False
+    normalized_body = normalized_error_text(body)
+    markers = AUTH_SCOPE_FAILURE_MARKERS + AUTH_PERMISSION_FAILURE_MARKERS
+    return any(marker in normalized_body for marker in markers)
 
 
 def filter_endpoints(spec, args, query=None):
@@ -367,7 +672,13 @@ def command_call(args):
 
     if args.dry_run:
         rendered_path = render_path(endpoint["path"], path_params)
-        auth_source = "direct_access_token" if os.environ.get("ZOHO_ACCESS_TOKEN") else "refresh_token"
+        mode = resolve_auth_mode()
+        if mode == "access_token":
+            auth_source = "direct_access_token"
+        elif mode == "refresh_token" or can_refresh_access_token():
+            auth_source = "refresh_token"
+        else:
+            auth_source = "direct_access_token"
         payload = {
             "method": endpoint.get("method"),
             "url": build_base_url() + (rendered_path if rendered_path.startswith("/") else "/" + rendered_path),
@@ -412,6 +723,96 @@ def command_call(args):
             print(json.dumps(parsed, indent=2))
             return
     print(body)
+
+
+def summarize_connection_payload(selector, parsed_body):
+    summary = {}
+    if selector == "getorganization" and isinstance(parsed_body, dict):
+        orgs = parsed_body.get("org")
+        if isinstance(orgs, list) and orgs and isinstance(orgs[0], dict):
+            org = orgs[0]
+            for source_key, target_key in (
+                ("company_name", "company_name"),
+                ("id", "org_id"),
+                ("type", "org_type"),
+                ("primary_email", "primary_email"),
+                ("zgid", "zgid"),
+            ):
+                value = org.get(source_key)
+                if value:
+                    summary[target_key] = value
+    elif selector == "getavailableapis" and isinstance(parsed_body, dict):
+        apis = parsed_body.get("__apis")
+        if isinstance(apis, list):
+            summary["available_api_count"] = len(apis)
+    return summary
+
+
+def run_connection_check(spec, selector):
+    endpoint = find_endpoint(spec, selector)
+    status, response_headers, body, url, _ = execute_request(endpoint, {}, {}, {}, None)
+    parsed_body = maybe_parse_json(body)
+    auth_context = resolve_auth_context()
+    return {
+        "selector": selector,
+        "title": endpoint.get("title"),
+        "status": status,
+        "url": url,
+        "auth_source": auth_context.get("source"),
+        "response_headers": response_headers,
+        "body": parsed_body if parsed_body is not None else body,
+        "summary": summarize_connection_payload(selector, parsed_body),
+    }
+
+
+def command_check(args):
+    spec = load_spec()
+    selectors = [args.selector] if args.selector else list(DEFAULT_CONNECTION_CHECK_SELECTORS)
+    attempts = []
+
+    for selector in selectors:
+        result = run_connection_check(spec, selector)
+        attempts.append(result)
+        if result["status"] == 200:
+            if args.json:
+                print(json.dumps({"ok": True, "attempts": attempts, "selected": selector}, indent=2))
+                return
+
+            print("PASS\tZoho connection verified")
+            print(f"Check: {selector}")
+            print(f"URL: {result['url']}")
+            print(f"Auth: {result['auth_source']}")
+            for key, value in result["summary"].items():
+                print(f"{key}: {value}")
+            return
+
+        if not is_scope_or_permission_error(result["status"], json.dumps(result["body"]) if isinstance(result["body"], (dict, list)) else str(result["body"])):
+            break
+
+    if args.json:
+        print(json.dumps({"ok": False, "attempts": attempts, "selected": attempts[-1]["selector"] if attempts else None}, indent=2))
+        raise SystemExit(1)
+
+    last_result = attempts[-1]
+    print("FAIL\tZoho connection check failed")
+    print(f"Check: {last_result['selector']}")
+    print(f"Status: {last_result['status']}")
+    print(f"URL: {last_result['url']}")
+    print(f"Auth: {last_result['auth_source']}")
+    if args.selector is None and is_scope_or_permission_error(
+        last_result["status"],
+        json.dumps(last_result["body"]) if isinstance(last_result["body"], (dict, list)) else str(last_result["body"]),
+    ):
+        print(
+            "Reason: the built-in check endpoints may require scopes your token does not have. "
+            "Try `zoho-cli check --selector <slug>` with an endpoint your token can read."
+        )
+    body = last_result["body"]
+    if isinstance(body, (dict, list)):
+        print(json.dumps(body, indent=2))
+    else:
+        print(body)
+    raise SystemExit(1)
 
 
 def resolve_path_value(data, path):
@@ -543,6 +944,14 @@ def build_parser():
     call.add_argument("--include-response-meta", action="store_true")
     call.set_defaults(func=command_call)
 
+    check = subparsers.add_parser("check", help="Verify live connectivity to the Zoho instance.")
+    check.add_argument(
+        "--selector",
+        help="Optional endpoint slug to use for the connection check. Defaults to built-in read-only checks.",
+    )
+    check.add_argument("--json", action="store_true", help="Print structured output.")
+    check.set_defaults(func=command_check)
+
     verify = subparsers.add_parser("verify", help="Run a verification manifest against live Zoho APIs.")
     verify.add_argument("manifest")
     verify.add_argument("--fail-fast", action="store_true")
@@ -553,6 +962,7 @@ def build_parser():
 
 
 def main():
+    load_env_files()
     parser = build_parser()
     args = parser.parse_args()
     args.func(args)
